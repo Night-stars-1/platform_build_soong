@@ -1604,6 +1604,31 @@ func TestVbmetaOmitsRecoveryWithoutStandaloneImage(t *testing.T) {
 	)
 }
 
+func TestRadioPartitionModuleNames(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		mapping map[string]string
+		want    []string
+	}{
+		{
+			name: "legacy partition names",
+			want: []string{"pvmfw", "modem"},
+		},
+		{
+			name:    "qualified firmware module avoids platform pvmfw",
+			mapping: map[string]string{"pvmfw": "//vendor/oneplus/hummer/radio:uwu_radio_pvmfw"},
+			want:    []string{"//vendor/oneplus/hummer/radio:uwu_radio_pvmfw", "modem"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			config := android.TestConfig(t.TempDir(), nil, "", nil)
+			config.TestProductVariables.PartitionVarsForSoongMigrationOnlyDoNotUse.AbOtaRadioPartitions = []string{"pvmfw", "modem"}
+			config.TestProductVariables.VendorVars = map[string]map[string]string{"uwuRadio": tc.mapping}
+			android.AssertDeepEquals(t, "radio module identities", tc.want, radioPartitionModuleNames(config))
+		})
+	}
+}
+
 func TestVbmetaGenerationWithPvmfw(t *testing.T) {
 	result := android.GroupFixturePreparers(
 		android.PrepareForIntegrationTestWithAndroid,

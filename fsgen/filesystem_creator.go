@@ -411,7 +411,7 @@ func (f *filesystemCreator) createInternalModules(ctx android.LoadHookContext) {
 	if radioImgModuleName := createRadioImg(ctx); radioImgModuleName != "" {
 		f.properties.Radio_image = radioImgModuleName
 	} else if radioPartitionNames := ctx.Config().ProductVariables().PartitionVarsForSoongMigrationOnlyDoNotUse.AbOtaRadioPartitions; len(radioPartitionNames) > 0 {
-		f.properties.Radio_partition_names = radioPartitionNames
+		f.properties.Radio_partition_names = radioPartitionModuleNames(ctx.Config())
 	}
 	if bootloader, ok := f.createBootloader(ctx); ok {
 		f.properties.Bootloader = bootloader
@@ -820,6 +820,23 @@ func (f *filesystemCreator) createDeviceModule(
 	}
 
 	ctx.CreateModule(filesystem.AndroidDeviceFactory, baseProps, partitionProps, deviceProps)
+}
+
+// Radio partition names remain OTA metadata, while dependencies may live in a
+// vendor namespace and must not resolve to unrelated platform modules.
+func radioPartitionModuleNames(config android.Config) []string {
+	partitions := config.ProductVariables().PartitionVarsForSoongMigrationOnlyDoNotUse.AbOtaRadioPartitions
+	modules := make([]string, 0, len(partitions))
+	mapping := config.VendorConfig("uwuRadio")
+	for _, partition := range partitions {
+		module := mapping.String(partition)
+		if module == "" {
+			// Retain compatibility with existing root-namespace radio modules.
+			module = partition
+		}
+		modules = append(modules, module)
+	}
+	return modules
 }
 
 func createRadioImg(ctx android.LoadHookContext) string {
