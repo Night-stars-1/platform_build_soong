@@ -141,12 +141,6 @@ func packageAdditionalLoadFiles(props *common.PrebuiltKernelModulesPropertiesJSO
 		seen[item.Install] = struct{}{}
 
 		contents := string(readZipFile(reader, item.Source))
-		isRecovery := item.Install == "modules.load.recovery"
-		var recoveryModules []string
-		var recoverySeen map[string]bool
-		if isRecovery {
-			recoverySeen = make(map[string]bool)
-		}
 		for lineNumber, line := range strings.Split(contents, "\n") {
 			line = strings.TrimSpace(line)
 			if line == "" {
@@ -157,25 +151,10 @@ func packageAdditionalLoadFiles(props *common.PrebuiltKernelModulesPropertiesJSO
 				fmt.Fprintf(os.Stderr, "Invalid module path in %s at line %d: %q\n", item.Source, lineNumber+1, line)
 				os.Exit(1)
 			}
-			if isRecovery {
-				if strings.ContainsAny(name, "/\\ \t\r") || !strings.HasSuffix(name, ".ko") || recoverySeen[name] {
-					fmt.Fprintf(os.Stderr, "Invalid or duplicate Recovery module in %s at line %d: %q\n", item.Source, lineNumber+1, name)
-					os.Exit(1)
-				}
-				recoverySeen[name] = true
-				recoveryModules = append(recoveryModules, name)
-			}
 			if _, ok := installed[name]; !ok {
 				fmt.Fprintf(os.Stderr, "Module %q in %s is not included in the install list\n", name, item.Source)
 				os.Exit(1)
 			}
-		}
-		if isRecovery {
-			if len(recoveryModules) == 0 {
-				fmt.Fprintf(os.Stderr, "Recovery module load list %s is empty\n", item.Source)
-				os.Exit(1)
-			}
-			contents = strings.Join(recoveryModules, "\n") + "\n"
 		}
 		must(os.WriteFile(filepath.Join(dir, item.Install), []byte(contents), 0o666))
 	}
