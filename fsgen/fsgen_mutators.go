@@ -231,6 +231,8 @@ func (m *moduleToInstallationProps) SortedKeys() []string {
 type FsGenState struct {
 	// Modules in PRODUCT_PACKAGES, generated prebuilts and optional kernel installers.
 	depCandidatesMap map[string]bool
+	// PRODUCT_PACKAGES_ARCH_SUFFIX: modules listed only as `name:32` or `name:64`.
+	productPackageBitness map[string]string
 	// Map of names of partition to the information of modules to be added as deps
 	fsDeps map[string]*multilibDeps
 	// Information about the main soong-generated partitions
@@ -315,12 +317,10 @@ func createFsGenState(ctx android.LoadHookContext, generatedPrebuiltEtcModuleNam
 			productInstalledModules(ctx, "all"),
 			generatedPrebuiltEtcModuleNames,
 		)
-		candidatesMap := map[string]bool{}
-		for _, candidate := range allInstalledModules {
-			candidatesMap[candidate] = true
-		}
+		candidatesMap, productPackageBitness := productPackageCandidates(allInstalledModules)
 		fsGenState := FsGenState{
-			depCandidatesMap: candidatesMap,
+			depCandidatesMap:      candidatesMap,
+			productPackageBitness: productPackageBitness,
 			fsDeps: map[string]*multilibDeps{
 				// These additional deps are added according to the cuttlefish system image bp.
 				"system": {
@@ -507,6 +507,60 @@ func appendDepIfAppropriate(mctx android.BottomUpMutatorContext, deps *multilibD
 	}
 }
 
+// PRODUCT_PACKAGES_ARCH_SUFFIX: Make accepts `name:32` and `name:64` in
+// PRODUCT_PACKAGES and installs only that bitness. Matching the raw entry
+// silently dropped those modules from Soong-only images. An unsuffixed entry
+// for the same module, or both suffixes, installs every variant as in Make.
+func splitProductPackageBitness(entry string) (string, string) {
+	i := strings.LastIndex(entry, ":")
+	if i <= 0 {
+		return entry, ""
+	}
+	if bits := entry[i+1:]; bits == "32" || bits == "64" {
+		return entry[:i], bits
+	}
+	return entry, ""
+}
+
+func productPackageName(entry string) string {
+	name, _ := splitProductPackageBitness(entry)
+	return name
+}
+
+func productPackageCandidates(entries []string) (map[string]bool, map[string]string) {
+	candidates := make(map[string]bool, len(entries))
+	unrestricted := map[string]bool{}
+	restricted := map[string]map[string]bool{}
+	for _, entry := range entries {
+		name, bits := splitProductPackageBitness(entry)
+		candidates[name] = true
+		if bits == "" {
+			unrestricted[name] = true
+			continue
+		}
+		if restricted[name] == nil {
+			restricted[name] = map[string]bool{}
+		}
+		restricted[name][bits] = true
+	}
+	bitness := map[string]string{}
+	for name, set := range restricted {
+		if unrestricted[name] || len(set) != 1 {
+			continue
+		}
+		for bits := range set {
+			bitness[name] = bits
+		}
+	}
+	return candidates, bitness
+}
+
+// Variants without a bitness (common arch) are never filtered.
+func productPackageVariantAllowed(bitness map[string]string, name, multilib string) bool {
+	bits, ok := bitness[name]
+	return !ok || multilib == "" || multilib == "lib"+bits
+}
+
 func isEligibleForFsDeps(mctx android.BottomUpMutatorContext) bool {
 	m := mctx.Module()
 	// Only add the module as dependency when:
@@ -539,7 +593,8 @@ func collectDepsMutator(mctx android.BottomUpMutatorContext) {
 
 	image, imageOk := mctx.Module().(android.ImageInterface)
 
-	if _, ok := fsGenState.depCandidatesMap[moduleName]; ok {
+	if _, ok := fsGenState.depCandidatesMap[moduleName]; ok &&
+		productPackageVariantAllowed(fsGenState.productPackageBitness, moduleName, m.Target().Arch.ArchType.Multilib) {
 		installPartition := m.PartitionTag(mctx.DeviceConfig())
 		systemPartitionFalsePositive := installPartition == "system" && android.InList(m.ImageVariation().Variation, []string{
 			// cc/image.go marks some ramdisk and recovery modules as platform.
@@ -696,6 +751,30 @@ func crossPartitionRequiredMutator(mctx android.BottomUpMutatorContext) {
 	}
 }
 
+// DITING_DLKM_RECOVERY: preserve module variants/namespaces while moving the
+// migrated installer from the platform ramdisk into the board's DLKM fragment.
+// Copy the dependency map: fs_set_deps must not mutate shared global state.
+func ditingVendorRamdiskDeps(partition string, deps, vendorDeps multilibDeps) (multilibDeps, error) {
+	if partition != "vendor_ramdisk" && partition != "vendor_ramdisk_fragment_dlkm" {
+		return deps, nil
+	}
+	const installer = "kernel_modules_vendor_ramdisk"
+	modules, found := vendorDeps[installer]
+	if !found || modules == nil {
+		return nil, fmt.Errorf("diting DLKM fragment requires selected %s", installer)
+	}
+	result := make(multilibDeps, len(deps)+1)
+	for name, props := range deps {
+		result[name] = props
+	}
+	if partition == "vendor_ramdisk" {
+		delete(result, installer)
+	} else {
+		result[installer] = modules
+	}
+	return result, nil
+}
+
 func setDepsMutator(mctx android.BottomUpMutatorContext) {
 	if !shouldEnableFilesystemCreator(mctx) {
 		return
@@ -724,7 +803,17 @@ func setDepsMutator(mctx android.BottomUpMutatorContext) {
 		// backgroundRecoveryImageGenerator generates additional images which takes precedence over images files
 		// created by other deps of recovery.img.
 		// Use this in highPriorityDeps
-		depsStruct := generateDepStruct(*fsDeps[partition], append([]string{backgroundRecoveryImageGenerator}, fsGenState.generatedPrebuiltEtcModuleNames...), overriddenDeps)
+		deps := *fsDeps[partition]
+		if mctx.Config().DeviceName() == "diting" && !mctx.Config().KatiEnabled() &&
+			slices.Equal(mctx.Config().ProductVariables().PartitionVarsForSoongMigrationOnlyDoNotUse.BoardVendorRamdiskFragments, []string{"dlkm"}) {
+			var err error
+			deps, err = ditingVendorRamdiskDeps(partition, deps, *fsDeps["vendor_ramdisk"])
+			if err != nil {
+				mctx.ModuleErrorf("%s", err)
+				return
+			}
+		}
+		depsStruct := generateDepStruct(deps, append([]string{backgroundRecoveryImageGenerator}, fsGenState.generatedPrebuiltEtcModuleNames...), overriddenDeps)
 		if !mctx.Config().KatiEnabled() {
 			depsStruct.Deps = append(depsStruct.Deps,
 				"fs_config_files_system",
@@ -868,7 +957,7 @@ func removeOverriddenDeps(mctx android.BottomUpMutatorContext) {
 		// dependency) and whether if the module is installed as a top level module.
 		moduleToRequiredRdepsMap := map[string][]string{}
 		for _, productPackagesEntry := range productInstalledModules(mctx, "all") {
-			if moduleName, _, ok := fsGenState.moduleToInstallationProps.GetFromModuleName(productPackagesEntry); ok {
+			if moduleName, _, ok := fsGenState.moduleToInstallationProps.GetFromModuleName(productPackageName(productPackagesEntry)); ok {
 				moduleToRequiredRdepsMap[moduleName] = append(moduleToRequiredRdepsMap[moduleName], "PRODUCT_PACKAGES")
 			}
 		}

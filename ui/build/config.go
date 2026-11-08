@@ -571,6 +571,9 @@ func newConfig(ctx Context, isDumpVar bool, args ...string) Config {
 		// Already incorporated into the config object
 		"SOONG_ONLY",
 	)
+	// Do not trust an inherited marker; explicit CLI/environment selection wins.
+	// Product defaults are resolved by dumpMakeVars before product configuration.
+	ret.environ.Set("UWU_SOONG_ONLY_BUILD", strconv.FormatBool(ret.soongOnlyRequested))
 
 	// Tell python not to spam the source tree with .pyc files.
 	ret.environ.Set("PYTHONDONTWRITEBYTECODE", "1")

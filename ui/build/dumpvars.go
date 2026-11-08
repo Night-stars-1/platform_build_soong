@@ -34,6 +34,7 @@ const (
 	DUMPVARS_PRE_CONFIG
 	DUMPVARS_PRODUCT_CONFIG
 	DUMPVARS_USER
+	DUMPVARS_BACKEND_PROBE
 )
 
 // These are needed to configure Siso's RBE rules.
@@ -103,6 +104,22 @@ func DumpMakeVars(ctx Context, config Config, goals, vars []string) (map[string]
 }
 
 func dumpMakeVars(ctx Context, config Config, goals, vars []string, tmpDir string, which dumpvarsType) (map[string]string, error) {
+	// PRODUCT_SOONG_ONLY is itself a product variable. Resolve its default in
+	// a read-only pass before evaluating conditional product and board files.
+	// Explicit command-line or SOONG_ONLY selections always take precedence.
+	probeDefault := !config.skipKatiControlledByFlags && (which == DUMPVARS_PRODUCT_CONFIG || which == DUMPVARS_USER)
+	if probeDefault {
+		config.Environment().Set("UWU_SOONG_ONLY_BUILD", "false")
+		probe, err := dumpMakeVars(ctx, config, goals, []string{"PRODUCT_SOONG_ONLY"}, tmpDir, DUMPVARS_BACKEND_PROBE)
+		if err != nil {
+			return nil, err
+		}
+		config.soongOnlyRequested = probe["PRODUCT_SOONG_ONLY"] == "true"
+		config.Environment().Set("UWU_SOONG_ONLY_BUILD", strconv.FormatBool(config.soongOnlyRequested))
+		if !slices.Contains(vars, "PRODUCT_SOONG_ONLY") {
+			vars = append(slices.Clone(vars), "PRODUCT_SOONG_ONLY")
+		}
+	}
 	e := ctx.BeginTrace(metrics.RunKati, "dumpvars")
 	defer e.End()
 
@@ -164,6 +181,9 @@ func dumpMakeVars(ctx Context, config Config, goals, vars []string, tmpDir strin
 		} else {
 			return nil, fmt.Errorf("Failed to parse make line: %q", line)
 		}
+	}
+	if probeDefault && (ret["PRODUCT_SOONG_ONLY"] == "true") != config.soongOnlyRequested {
+		return nil, fmt.Errorf("PRODUCT_SOONG_ONLY must not depend on UWU_SOONG_ONLY_BUILD")
 	}
 	if ctx.Metrics != nil {
 		// Also include TARGET_RELEASE in the metrics.  Do this first

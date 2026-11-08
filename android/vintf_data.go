@@ -38,6 +38,9 @@ type vintfDataProperties struct {
 	// Optional name for the installed file. If unspecified it will be manifest.xml by default.
 	Filename *string
 
+	// Optional module-local vendor manifest fragments, for per-SKU manifests.
+	Srcs []string `android:"path"`
+
 	// Type of the vintf data type, the allowed type are device_compatibility_matrix, system_manifest,
 	// product_manifest, and system_ext_manifest.
 	Type *string
@@ -116,6 +119,9 @@ func (m *vintfDataRule) GenerateAndroidBuildActions(ctx ModuleContext) {
 	case vendorManifestType:
 		assembleVintfEnvs = append(assembleVintfEnvs, fmt.Sprintf("BOARD_SEPOLICY_VERS=\"%s\"", ctx.DeviceConfig().BoardSepolicyVers()))
 		deviceManifestFiles := PathsForSource(ctx, ctx.Config().DeviceManifestFiles())
+		if len(m.properties.Srcs) > 0 {
+			deviceManifestFiles = PathsForModuleSrc(ctx, m.properties.Srcs)
+		}
 		// Only need to generate the manifest if DEVICE_MANIFEST_FILE is defined.
 		if len(deviceManifestFiles) == 0 {
 			m.noAction = true

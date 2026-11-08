@@ -1031,6 +1031,16 @@ func partitionSpecificFsProps(ctx android.EarlyModuleContext, partitions allGene
 		fsProps.Security_patch = proptools.StringPtr(ctx.Config().PlatformSecurityPatch())
 		fsProps.Stem = proptools.StringPtr("product.img")
 	case "vendor":
+		// DITING_FIRMWARE_MOUNTPOINTS: mkdir modules only export AndroidMk rules.
+		// The Soong filesystem must contain the empty mountpoints itself.
+		if ctx.Config().DeviceName() == "diting" {
+			fsProps.Dirs.AppendSimpleValue([]string{
+				"bt_firmware",
+				"dsp",
+				"firmware_mnt",
+				"vm-system",
+			})
+		}
 		fsProps.Gen_aconfig_flags_pb = proptools.BoolPtr(true)
 		fsProps.Check_vintf = proptools.BoolPtr(true)
 		if ctx.DeviceConfig().OdmPath() == "odm" {
@@ -1186,7 +1196,7 @@ func partitionSpecificFsProps(ctx android.EarlyModuleContext, partitions allGene
 			fsProps.Include_files_of,
 			generatedModuleNameForPartition(ctx.Config(), "vendor_ramdisk"),
 		)
-		if recoveryName := partitions.nameForType("recovery"); recoveryName != "" {
+		if recoveryName := partitions.nameForType("recovery"); recoveryName != "" && ctx.DeviceConfig().BoardMoveRecoveryResourcesToVendorBoot() {
 			fsProps.Include_files_of = append(
 				fsProps.Include_files_of,
 				recoveryName,

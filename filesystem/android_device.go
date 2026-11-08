@@ -1000,6 +1000,9 @@ func (a *androidDevice) buildTargetFilesZip(ctx android.ModuleContext, allInstal
 		bootImg := ctx.GetDirectDepProxyWithTag(proptools.String(a.partitionProps.Vendor_boot_partition_name), filesystemDepTag)
 		bootImgInfo, _ := android.OtherModuleProvider(ctx, bootImg, BootimgInfoProvider)
 		builder.Command().Textf("mkdir -p %s/VENDOR_BOOT", targetFilesDir)
+		if pageSize := ctx.Config().ProductVariables().PartitionVarsForSoongMigrationOnlyDoNotUse.BoardKernelPagesize; pageSize != "" {
+			builder.Command().Textf("echo %s > %s/VENDOR_BOOT/pagesize", pageSize, targetFilesDir)
+		}
 		builder.Command().Textf("echo %s > %s/VENDOR_BOOT/cmdline", proptools.ShellEscape(strings.Join(bootImgInfo.Cmdline, " ")), targetFilesDir)
 		builder.Command().Textf("echo %s > %s/VENDOR_BOOT/vendor_cmdline", proptools.ShellEscape(strings.Join(bootImgInfo.Cmdline, " ")), targetFilesDir)
 		if base := ctx.Config().ProductVariables().PartitionVarsForSoongMigrationOnlyDoNotUse.BoardKernelBase; base != "" {
@@ -1640,9 +1643,7 @@ func (a *androidDevice) addMiscInfo(ctx android.ModuleContext) android.Path {
 	} else {
 		if a.partitionProps.Boot_partition_name != nil {
 			builder.Command().
-				Textf("echo mkbootimg_args='--header_version %s' >> %s", a.getBootimgHeaderVersion(ctx, a.partitionProps.Boot_partition_name), miscInfo).
-				// TODO: Use boot's header version for recovery for now since cuttlefish does not set `BOARD_RECOVERY_MKBOOTIMG_ARGS`
-				Textf(" && echo recovery_mkbootimg_args='--header_version %s' >> %s", a.getBootimgHeaderVersion(ctx, a.partitionProps.Boot_partition_name), miscInfo)
+				Textf("echo mkbootimg_args='--header_version %s' >> %s", a.getBootimgHeaderVersion(ctx, a.partitionProps.Boot_partition_name), miscInfo)
 		} else if a.partitionProps.Vendor_boot_partition_name != nil {
 			builder.Command().
 				Textf("echo mkbootimg_args='--header_version %s' >> %s", a.getBootimgHeaderVersion(ctx, a.partitionProps.Vendor_boot_partition_name), miscInfo)
@@ -1656,6 +1657,10 @@ func (a *androidDevice) addMiscInfo(ctx android.ModuleContext) android.Path {
 			Textf("echo mkbootimg_version_args='--os_version %s --os_patch_level %s' >> %s", ctx.Config().PlatformVersionLastStable(), ctx.Config().PlatformSecurityPatch(), miscInfo).
 			Textf(" && echo multistage_support=1 >> %s", miscInfo).
 			Textf(" && echo blockimgdiff_versions=3,4 >> %s", miscInfo)
+	}
+	if a.partitionProps.Recovery_partition_name != nil &&
+		ctx.Config().ProductVariables().PartitionVarsForSoongMigrationOnlyDoNotUse.BoardExcludeKernelFromRecoveryImage {
+		builder.Command().Textf("echo exclude_kernel_from_recovery_image=true >> %s", miscInfo)
 	}
 	if a.partitionProps.Recovery_partition_name != nil {
 		args := ctx.Config().ProductVariables().PartitionVarsForSoongMigrationOnlyDoNotUse.BoardRecoveryMkbootimgArgs
@@ -1704,11 +1709,13 @@ func (a *androidDevice) addMiscInfo(ctx android.ModuleContext) android.Path {
 	// TODO: Add support for TARGET_RECOVERY_FSTYPE_MOUNT_OPTIONS which can be used to override the default
 	builder.Command().Textf("echo recovery_mount_options=%s >> %s", defaultTargetRecoveryFstypeMountOptions, miscInfo)
 
-	// vintf information
-	builder.Command().Textf("echo vintf_enforce=true >> %s", miscInfo)
-	if len(ctx.Config().DeviceManifestFiles()) > 0 {
-		builder.Command().Textf("echo vintf_include_empty_vendor_sku=true >> %s", miscInfo)
-	}
+	// Preserve SKU selection for releasetools, matching Make's misc_info.
+	vintfInfo := android.PathForModuleOut(ctx, "vintf_sku_misc_info.txt")
+	android.WriteFileRuleVerbatim(ctx, vintfInfo, vintfSkuMiscInfo(
+		ctx.Config().DeviceManifestSkus(), ctx.Config().OdmManifestSkus(),
+		len(ctx.Config().DeviceManifestFiles()) > 0, len(ctx.Config().OdmManifestFiles()) > 0,
+	))
+	builder.Command().Text("cat").Input(vintfInfo).Textf(" >> %s", miscInfo)
 
 	if a.partitionProps.Recovery_partition_name == nil {
 		builder.Command().Textf("echo no_recovery=true >> %s", miscInfo)
@@ -1836,6 +1843,25 @@ func (a *androidDevice) addMiscInfo(ctx android.ModuleContext) android.Path {
 	builder.Build("misc_info", "Building misc_info")
 
 	return miscInfo
+}
+
+// Preserve the same SKU enumeration as Make's target_files misc_info.
+// The releasetools checker reads these keys rather than the product variables.
+func vintfSkuMiscInfo(vendorSkus, odmSkus []string, includeEmptyVendor, includeEmptyOdm bool) string {
+	lines := []string{"vintf_enforce=true"}
+	if len(vendorSkus) > 0 {
+		lines = append(lines, "vintf_vendor_manifest_skus="+strings.Join(vendorSkus, " "))
+	}
+	if len(odmSkus) > 0 {
+		lines = append(lines, "vintf_odm_manifest_skus="+strings.Join(odmSkus, " "))
+	}
+	if includeEmptyVendor {
+		lines = append(lines, "vintf_include_empty_vendor_sku=true")
+	}
+	if includeEmptyOdm {
+		lines = append(lines, "vintf_include_empty_odm_sku=true")
+	}
+	return strings.Join(lines, "\n") + "\n"
 }
 
 func (a *androidDevice) getBootimgHeaderVersion(ctx android.ModuleContext, bootImgName *string) string {

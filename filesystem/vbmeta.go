@@ -434,6 +434,17 @@ func (v *vbmeta) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	setCommonFilesystemInfo(ctx, v)
 }
 
+// Keep target_files arguments consistent with direct vbmeta image generation.
+func vbmetaMiscFlags(flags *int64, topLevel, eng bool) []string {
+	if flags != nil {
+		return []string{"--flags " + strconv.FormatInt(*flags, 10)}
+	}
+	if topLevel && eng {
+		return []string{"--set_hashtree_disabled_flag"}
+	}
+	return nil
+}
+
 func (v *vbmeta) buildPropFileForMiscInfo(ctx android.ModuleContext) android.Path {
 	var lines []string
 	addStr := func(name string, value string) {
@@ -486,9 +497,7 @@ func (v *vbmeta) buildPropFileForMiscInfo(ctx android.ModuleContext) android.Pat
 
 	// We only need the flag in top-level vbmeta.img.
 	// https://cs.android.com/android/platform/superproject/main/+/main:build/make/core/Makefile;l=4917;drc=a951ebf0198006f7fd38073a05c442d0eb92f97b
-	if ctx.Config().Eng() && v.partitionName() == "vbmeta" {
-		args = append(args, "--set_hashtree_disabled_flag")
-	}
+	args = append(args, vbmetaMiscFlags(v.properties.Flags, v.partitionName() == "vbmeta", ctx.Config().Eng())...)
 
 	args = append(args, "--rollback_index "+v.rollbackIndexString(ctx))
 	addStr(fmt.Sprintf("avb_%s_args", v.partitionName()), strings.Join(args, " "))
